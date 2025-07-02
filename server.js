@@ -195,13 +195,6 @@ io.on('connection', socket => {
           io.to(targetSocketId).emit('newProducer', { producerId: producer.id, socketId });
         }
       });
-
-      // Optionally, notify everyone else that a new participant has joined
-      // room.participants.forEach(pid => {
-      //   if (pid !== targetSocketId) {
-      //     io.to(pid).emit('participant-joined', { socketId: targetSocketId });
-      //   }
-      // });
     }
   });
 
@@ -210,7 +203,6 @@ io.on('connection', socket => {
   });
 
   socket.on('disconnect', () => {
-    // Remove peer from room and clean up producers/consumers/transports
     let roomId = findRoomByParticipant(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
