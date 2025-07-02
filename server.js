@@ -46,8 +46,8 @@ const mediaCodecs = [
   router = await worker.createRouter({ mediaCodecs });
   console.log('✅ mediasoup router created');
 
-  server.listen(port, () => {
-    console.log('✅ Server running at https://192.168.178.163:3000');
+  server.listen(3000, () => {
+    console.log('✅ Server running on port 3000');
   });
 })();
 
