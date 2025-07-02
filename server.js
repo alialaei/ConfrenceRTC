@@ -2,13 +2,14 @@ const express = require('express');
 const path = require('path');
 const { Server } = require('socket.io');
 const mediasoup = require('mediasoup');
+const http = require('http');
+const fallback = require('express-history-api-fallback');
 
 const rooms = new Map();
+const peers = new Map(); // key: socket.id → { transports, producers, consumers }
 
 const app = express();
-const http = require('http');
 const server = http.createServer(app);
-
 const io = new Server(server, {
   cors: {
     origin: '*'
@@ -19,7 +20,6 @@ const port = 3000;
 
 let worker;
 let router;
-let peers = new Map(); // key: socket.id → { transports, producers, consumers }
 
 const mediaCodecs = [
   {
@@ -35,6 +35,7 @@ const mediaCodecs = [
   }
 ];
 
+// Start mediasoup worker and HTTP server
 (async () => {
   worker = await mediasoup.createWorker();
   console.log('✅ mediasoup worker created');
@@ -42,8 +43,8 @@ const mediaCodecs = [
   router = await worker.createRouter({ mediaCodecs });
   console.log('✅ mediasoup router created');
 
-  server.listen(3000, () => {
-    console.log('✅ Server running on port 3000');
+  server.listen(port, () => {
+    console.log(`✅ Server running on port ${port}`);
   });
 })();
 
@@ -51,11 +52,11 @@ io.on('connection', socket => {
   console.log('🔌 New client:', socket.id);
   peers.set(socket.id, { transports: [], producers: [], consumers: [] });
 
-  socket.on('getRouterRtpCapabilities', (cb) => {
+  socket.on('getRouterRtpCapabilities', cb => {
     cb(router.rtpCapabilities);
   });
 
-  socket.on('createTransport', async (cb) => {
+  socket.on('createTransport', async cb => {
     const transport = await router.createWebRtcTransport({
       listenIps: [{ ip: '0.0.0.0', announcedIp: 'webrtcserver.mmup.org' }],
       enableUdp: true,
@@ -91,7 +92,6 @@ io.on('connection', socket => {
     peers.get(socket.id).producers.push(producer);
     cb({ id: producer.id });
 
-    // inform others
     socket.broadcast.emit('newProducer', { producerId: producer.id });
   });
 
@@ -144,10 +144,9 @@ io.on('connection', socket => {
     } else {
       console.log(`[ERROR] Owner socket not found for room: ${roomId}`);
     }
+
     cb({ isOwner: false, waitForApproval: true });
   });
-
-
 
   socket.on('approve-join', ({ targetSocketId }) => {
     const room = [...rooms.values()].find(r => r.ownerId === socket.id);
@@ -174,8 +173,7 @@ io.on('connection', socket => {
   });
 });
 
-const fallback = require('express-history-api-fallback');
+// Static and fallback routing
 const root = path.join(__dirname, 'public');
-
 app.use(express.static(root));
 app.use(fallback('index.html', { root }));
