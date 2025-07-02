@@ -6,13 +6,15 @@ const http = require('http');
 const fallback = require('express-history-api-fallback');
 
 const rooms = new Map();
-const peers = new Map(); // key: socket.id → { transports, producers, consumers }
+// roomId -> { ownerId, participants: [socketId], waiting: [socketId], producers: [producer], consumers: [consumer], transports: [transport] }
+const peers = new Map(); // socketId -> { transports, producers, consumers }
 
 const app = express();
 const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
-    origin: ['https://conference.mmup.org'], // frontend domain
+    origin: ['https://conference.mmup.org'],
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -37,7 +39,6 @@ const mediaCodecs = [
   }
 ];
 
-// Start mediasoup worker and HTTP server
 (async () => {
   worker = await mediasoup.createWorker();
   console.log('✅ mediasoup worker created');
@@ -66,6 +67,7 @@ io.on('connection', socket => {
       preferUdp: true
     });
 
+    // Track transports per peer
     peers.get(socket.id).transports.push(transport);
 
     cb({
@@ -75,6 +77,7 @@ io.on('connection', socket => {
       dtlsParameters: transport.dtlsParameters
     });
 
+    // Cleanup on close
     transport.on('dtlsstatechange', dtlsState => {
       if (dtlsState === 'closed') {
         transport.close();
@@ -84,25 +87,57 @@ io.on('connection', socket => {
 
   socket.on('connectTransport', async ({ transportId, dtlsParameters }, cb) => {
     const transport = peers.get(socket.id).transports.find(t => t.id === transportId);
+    if (!transport) return cb({ error: 'Transport not found' });
     await transport.connect({ dtlsParameters });
     cb();
   });
 
+  // User produces media (publishes audio/video)
   socket.on('produce', async ({ transportId, kind, rtpParameters }, cb) => {
     const transport = peers.get(socket.id).transports.find(t => t.id === transportId);
+    if (!transport) return cb({ error: 'Transport not found' });
     const producer = await transport.produce({ kind, rtpParameters });
-    peers.get(socket.id).producers.push(producer);
-    cb({ id: producer.id });
 
-    socket.broadcast.emit('newProducer', { producerId: producer.id });
+    peers.get(socket.id).producers.push(producer);
+
+    // Store the producer in the room for others to consume
+    // (Map roomId -> array of { socketId, producer })
+    let roomId = findRoomByParticipant(socket.id);
+    if (roomId) {
+      const room = rooms.get(roomId);
+      if (!room.producers) room.producers = [];
+      room.producers.push({ socketId: socket.id, producer });
+      // Inform everyone else in the room
+      room.participants.forEach(pid => {
+        if (pid !== socket.id) {
+          io.to(pid).emit('newProducer', { producerId: producer.id, socketId: socket.id });
+        }
+      });
+    }
+
+    cb({ id: producer.id });
   });
 
+  // User wants to consume a media stream from another user
   socket.on('consume', async ({ producerId, rtpCapabilities }, cb) => {
     if (!router.canConsume({ producerId, rtpCapabilities })) {
       return cb({ error: 'Cannot consume' });
     }
 
-    const transport = peers.get(socket.id).transports[0];
+    // Find or create a transport for consuming
+    let transport = peers.get(socket.id).transports.find(t => t.appData && t.appData.consuming);
+    if (!transport) {
+      // Create new consuming transport if needed
+      transport = await router.createWebRtcTransport({
+        listenIps: [{ ip: '0.0.0.0', announcedIp: 'webrtcserver.mmup.org' }],
+        enableUdp: true,
+        enableTcp: true,
+        preferUdp: true,
+        appData: { consuming: true }
+      });
+      peers.get(socket.id).transports.push(transport);
+    }
+
     const consumer = await transport.consume({
       producerId,
       rtpCapabilities,
@@ -119,6 +154,7 @@ io.on('connection', socket => {
     });
   });
 
+  // Room join/approval logic
   socket.on('join-room', ({ roomId, isOwnerCandidate }, cb) => {
     console.log(`[join-room] socket: ${socket.id}, roomId: ${roomId}, isOwnerCandidate: ${isOwnerCandidate}`);
     if (!rooms.has(roomId)) {
@@ -126,7 +162,8 @@ io.on('connection', socket => {
         rooms.set(roomId, {
           ownerId: socket.id,
           participants: [socket.id],
-          waiting: []
+          waiting: [],
+          producers: [],
         });
         cb({ isOwner: true });
         return;
@@ -156,6 +193,11 @@ io.on('connection', socket => {
       room.waiting = room.waiting.filter(id => id !== targetSocketId);
       room.participants.push(targetSocketId);
       io.to(targetSocketId).emit('join-approved');
+
+      // After approval, send all active producer IDs in the room to the newly joined participant
+      room.producers.forEach(({ producer }) => {
+        io.to(targetSocketId).emit('newProducer', { producerId: producer.id });
+      });
     }
   });
 
@@ -164,16 +206,30 @@ io.on('connection', socket => {
   });
 
   socket.on('disconnect', () => {
-    rooms.forEach((room, roomId) => {
+    // Remove peer from room and clean up producers/consumers/transports
+    let roomId = findRoomByParticipant(socket.id);
+    if (roomId) {
+      const room = rooms.get(roomId);
       room.participants = room.participants.filter(id => id !== socket.id);
       room.waiting = room.waiting.filter(id => id !== socket.id);
+      room.producers = (room.producers || []).filter(p => p.socketId !== socket.id);
       if (room.ownerId === socket.id) {
         io.to(room.participants).emit('room-closed');
         rooms.delete(roomId);
       }
-    });
+    }
+    peers.delete(socket.id);
   });
 });
+
+function findRoomByParticipant(socketId) {
+  for (const [roomId, room] of rooms.entries()) {
+    if (room.participants && room.participants.includes(socketId)) {
+      return roomId;
+    }
+  }
+  return null;
+}
 
 // Static and fallback routing
 const root = path.join(__dirname, 'public');
