@@ -1,6 +1,4 @@
 const express = require('express');
-const fs = require('fs');
-const https = require('https');
 const path = require('path');
 const { Server } = require('socket.io');
 const mediasoup = require('mediasoup');
@@ -8,10 +6,8 @@ const mediasoup = require('mediasoup');
 const rooms = new Map();
 
 const app = express();
-const server = https.createServer({
-  key: fs.readFileSync(path.join(__dirname, 'key.pem')),
-  cert: fs.readFileSync(path.join(__dirname, 'cert.pem'))
-}, app);
+const http = require('http');
+const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
@@ -61,7 +57,7 @@ io.on('connection', socket => {
 
   socket.on('createTransport', async (cb) => {
     const transport = await router.createWebRtcTransport({
-      listenIps: [{ ip: '0.0.0.0', announcedIp: '192.168.178.163' }],
+      listenIps: [{ ip: '0.0.0.0', announcedIp: 'webrtcserver.mmup.org' }],
       enableUdp: true,
       enableTcp: true,
       preferUdp: true
