@@ -6,7 +6,7 @@ const http = require('http');
 const fallback = require('express-history-api-fallback');
 
 const rooms = new Map();
-// roomId -> { ownerId, participants: [socketId], waiting: [socketId], producers: [producer], consumers: [consumer], transports: [transport] }
+// roomId -> { ownerId, participants: [socketId], waiting: [socketId], producers: [{socketId, producer}] }
 const peers = new Map(); // socketId -> { transports, producers, consumers }
 
 const app = express();
@@ -67,7 +67,6 @@ io.on('connection', socket => {
       preferUdp: true
     });
 
-    // Track transports per peer
     peers.get(socket.id).transports.push(transport);
 
     cb({
@@ -77,7 +76,6 @@ io.on('connection', socket => {
       dtlsParameters: transport.dtlsParameters
     });
 
-    // Cleanup on close
     transport.on('dtlsstatechange', dtlsState => {
       if (dtlsState === 'closed') {
         transport.close();
@@ -101,17 +99,15 @@ io.on('connection', socket => {
     peers.get(socket.id).producers.push(producer);
 
     // Store the producer in the room for others to consume
-    // (Map roomId -> array of { socketId, producer })
     let roomId = findRoomByParticipant(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
       if (!room.producers) room.producers = [];
       room.producers.push({ socketId: socket.id, producer });
-      // Inform everyone else in the room
+
+      // Inform everyone in the room (including the new producer themself)
       room.participants.forEach(pid => {
-        if (pid !== socket.id) {
-          io.to(pid).emit('newProducer', { producerId: producer.id, socketId: socket.id });
-        }
+        io.to(pid).emit('newProducer', { producerId: producer.id, socketId: socket.id });
       });
     }
 
@@ -127,7 +123,6 @@ io.on('connection', socket => {
     // Find or create a transport for consuming
     let transport = peers.get(socket.id).transports.find(t => t.appData && t.appData.consuming);
     if (!transport) {
-      // Create new consuming transport if needed
       transport = await router.createWebRtcTransport({
         listenIps: [{ ip: '0.0.0.0', announcedIp: 'webrtcserver.mmup.org' }],
         enableUdp: true,
@@ -194,10 +189,19 @@ io.on('connection', socket => {
       room.participants.push(targetSocketId);
       io.to(targetSocketId).emit('join-approved');
 
-      // After approval, send all active producer IDs in the room to the newly joined participant
-      room.producers.forEach(({ producer }) => {
-        io.to(targetSocketId).emit('newProducer', { producerId: producer.id });
+      // Send all current producers in the room to the newly joined participant
+      room.producers.forEach(({ producer, socketId }) => {
+        if (producer && producer.id) {
+          io.to(targetSocketId).emit('newProducer', { producerId: producer.id, socketId });
+        }
       });
+
+      // Optionally, notify everyone else that a new participant has joined
+      // room.participants.forEach(pid => {
+      //   if (pid !== targetSocketId) {
+      //     io.to(pid).emit('participant-joined', { socketId: targetSocketId });
+      //   }
+      // });
     }
   });
 
