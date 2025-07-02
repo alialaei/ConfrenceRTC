@@ -1,0 +1,34 @@
+# Dependency directories
+node_modules/
+
+# Editor & OS files
+.history/
+.vscode/
+.idea/
+.DS_Store
+
+# Output / build directories (in case of TS/compiled code)
+dist/
+build/
+
+# Environment files
+.env
+.env.local
+.env.development
+.env.production
+
+# Logs
+logs/
+*.log
+
+# SSL key files (for HTTPS certs)
+*.pem
+cert/
+key/
+
+# System files
+Thumbs.db
+*.swp
+
+# Lock file (optional – see notes below)
+package-lock.json
