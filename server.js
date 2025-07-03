@@ -26,6 +26,18 @@ const mediaCodecs = [
   { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 }
 ];
 
+// 👇 Your TURN server config!
+const ICE_SERVERS = [
+  {
+    urls: 'turn:conference.mmup.org:3478',
+    username: 'testuser',
+    credential: 'testpassword'
+  },
+  {
+    urls: 'stun:stun.l.google.com:19302' // optional as fallback
+  }
+];
+
 // Mediasoup bootstrap
 (async () => {
   worker = await mediasoup.createWorker();
@@ -47,14 +59,18 @@ io.on('connection', socket => {
     console.log(`[${socket.id}] createTransport`);
     const transport = await router.createWebRtcTransport({
       listenIps: [{ ip: '0.0.0.0', announcedIp: '52.47.158.117' }],
-      enableUdp: true, enableTcp: true, preferUdp: true
+      enableUdp: true,
+      enableTcp: true,
+      preferUdp: true,
+      iceServers: ICE_SERVERS  // 👈 Pass ICE servers here!
     });
     peers.get(socket.id).transports.push(transport);
     cb({
       id: transport.id,
       iceParameters: transport.iceParameters,
       iceCandidates: transport.iceCandidates,
-      dtlsParameters: transport.dtlsParameters
+      dtlsParameters: transport.dtlsParameters,
+      iceServers: ICE_SERVERS  // 👈 Pass them to client too!
     });
     transport.on('dtlsstatechange', dtlsState => {
       if (dtlsState === 'closed') transport.close();
@@ -108,9 +124,12 @@ io.on('connection', socket => {
     let transport = peers.get(socket.id).transports.find(t => t.appData && t.appData.consuming);
     if (!transport) {
       transport = await router.createWebRtcTransport({
-        listenIps: [{ ip: '0.0.0.0', announcedIp: 'webrtcserver.mmup.org' }],
-        enableUdp: true, enableTcp: true, preferUdp: true,
-        appData: { consuming: true }
+        listenIps: [{ ip: '0.0.0.0', announcedIp: '52.47.158.117' }],
+        enableUdp: true,
+        enableTcp: true,
+        preferUdp: true,
+        appData: { consuming: true },
+        iceServers: ICE_SERVERS   // 👈 Pass ICE servers here as well!
       });
       peers.get(socket.id).transports.push(transport);
       console.log(`[${socket.id}] Created new consuming transport: ${transport.id}`);
