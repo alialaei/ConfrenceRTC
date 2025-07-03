@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const path = require('path');
 const { Server } = require('socket.io');
@@ -27,6 +26,7 @@ const mediaCodecs = [
   { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 }
 ];
 
+// Mediasoup bootstrap
 (async () => {
   worker = await mediasoup.createWorker();
   router = await worker.createRouter({ mediaCodecs });
@@ -37,7 +37,7 @@ io.on('connection', socket => {
   console.log(`🔌 [CONNECT] ${socket.id}`);
   peers.set(socket.id, { transports: [], producers: [], consumers: [] });
 
-  // === Mediasoup standard ===
+  // --- Mediasoup core events ---
   socket.on('getRouterRtpCapabilities', cb => {
     console.log(`[${socket.id}] getRouterRtpCapabilities`);
     cb(router.rtpCapabilities);
@@ -86,13 +86,13 @@ io.on('connection', socket => {
     if (roomId) {
       const room = rooms.get(roomId);
       room.producers.push({ socketId: socket.id, producer });
-      console.log(`[${socket.id}] produced for room ${roomId}. Now notifying other participants.`);
+      console.log(`[${socket.id}] produced for room ${roomId}. Notifying participants.`);
 
-      // Inform everyone else in the room about the new producer (not the producer themself!)
+      // Notify all others (not self) about new producer
       room.participants.forEach(pid => {
         if (pid !== socket.id) {
           io.to(pid).emit('newProducer', { producerId: producer.id, socketId: socket.id });
-          console.log(`-- [room:${roomId}] Notifying ${pid} about newProducer ${producer.id} from ${socket.id}`);
+          console.log(`-- [room:${roomId}] Notified ${pid} about newProducer ${producer.id} from ${socket.id}`);
         }
       });
     }
@@ -105,7 +105,6 @@ io.on('connection', socket => {
       console.log(`[${socket.id}] ERROR: Cannot consume producer ${producerId}`);
       return cb({ error: 'Cannot consume' });
     }
-
     let transport = peers.get(socket.id).transports.find(t => t.appData && t.appData.consuming);
     if (!transport) {
       transport = await router.createWebRtcTransport({
@@ -126,7 +125,7 @@ io.on('connection', socket => {
     });
   });
 
-  // ===== Room Logic =====
+  // --- Room logic ---
   socket.on('join-room', ({ roomId }, cb) => {
     console.log(`[${socket.id}] join-room ${roomId}`);
     if (ownerDisconnectTimers[roomId]) {
@@ -134,7 +133,6 @@ io.on('connection', socket => {
       delete ownerDisconnectTimers[roomId];
       console.log(`[${socket.id}] Cleared disconnect timer for room ${roomId}`);
     }
-
     if (!rooms.has(roomId)) {
       // First user = owner
       rooms.set(roomId, {
@@ -162,6 +160,7 @@ io.on('connection', socket => {
     if (room) {
       room.waiting = room.waiting.filter(id => id !== targetSocketId);
       if (!room.participants.includes(targetSocketId)) room.participants.push(targetSocketId);
+      // Send all *other* participants' producers, grouped by socketId
       io.to(targetSocketId).emit('join-approved', {
         existingProducers: (room.producers || []).filter(p => p.socketId !== targetSocketId).map(p => ({
           producerId: p.producer.id, socketId: p.socketId
@@ -180,7 +179,6 @@ io.on('connection', socket => {
     let roomId = findRoomByParticipant(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
-      // Owner disconnects: 30s grace
       if (room.ownerId === socket.id) {
         ownerDisconnectTimers[roomId] = setTimeout(() => {
           io.to(room.participants).emit('room-closed');
@@ -188,7 +186,6 @@ io.on('connection', socket => {
           console.log(`[${socket.id}] (owner) closed room ${roomId}`);
         }, 30000);
       } else {
-        // Remove participant & their producers
         room.participants = room.participants.filter(id => id !== socket.id);
         room.waiting = room.waiting.filter(id => id !== socket.id);
         room.producers = (room.producers || []).filter(p => p.socketId !== socket.id);
