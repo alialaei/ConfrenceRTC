@@ -6,7 +6,6 @@ const http = require('http');
 const fallback = require('express-history-api-fallback');
 
 const rooms = new Map();
-// roomId -> { ownerId, participants: [socketId], waiting: [socketId], producers: [{socketId, producer}] }
 const peers = new Map(); // socketId -> { transports, producers, consumers }
 
 const app = express();
@@ -52,34 +51,24 @@ const mediaCodecs = [
 })();
 
 io.on('connection', socket => {
-  console.log('🔌 New client:', socket.id);
   peers.set(socket.id, { transports: [], producers: [], consumers: [] });
 
-  socket.on('getRouterRtpCapabilities', cb => {
-    cb(router.rtpCapabilities);
-  });
+  socket.on('getRouterRtpCapabilities', cb => cb(router.rtpCapabilities));
 
   socket.on('createTransport', async cb => {
     const transport = await router.createWebRtcTransport({
       listenIps: [{ ip: '0.0.0.0', announcedIp: 'webrtcserver.mmup.org' }],
-      enableUdp: true,
-      enableTcp: true,
-      preferUdp: true
+      enableUdp: true, enableTcp: true, preferUdp: true
     });
-
     peers.get(socket.id).transports.push(transport);
-
     cb({
       id: transport.id,
       iceParameters: transport.iceParameters,
       iceCandidates: transport.iceCandidates,
       dtlsParameters: transport.dtlsParameters
     });
-
     transport.on('dtlsstatechange', dtlsState => {
-      if (dtlsState === 'closed') {
-        transport.close();
-      }
+      if (dtlsState === 'closed') transport.close();
     });
   });
 
@@ -90,95 +79,66 @@ io.on('connection', socket => {
     cb();
   });
 
-  // User produces media (publishes audio/video)
   socket.on('produce', async ({ transportId, kind, rtpParameters }, cb) => {
     const transport = peers.get(socket.id).transports.find(t => t.id === transportId);
     if (!transport) return cb({ error: 'Transport not found' });
     const producer = await transport.produce({ kind, rtpParameters });
-
     peers.get(socket.id).producers.push(producer);
 
-    // Store the producer in the room for others to consume
+    // Add to room producers
     let roomId = findRoomByParticipant(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
       if (!room.producers) room.producers = [];
       room.producers.push({ socketId: socket.id, producer });
 
-      // Inform everyone in the room (including the new producer themself)
+      // Broadcast to other participants
       room.participants.forEach(pid => {
-        io.to(pid).emit('newProducer', { producerId: producer.id, socketId: socket.id });
+        if (pid !== socket.id) io.to(pid).emit('newProducer', { producerId: producer.id, socketId: socket.id });
       });
     }
-
     cb({ id: producer.id });
   });
 
-  // User wants to consume a media stream from another user
   socket.on('consume', async ({ producerId, rtpCapabilities }, cb) => {
-    if (!router.canConsume({ producerId, rtpCapabilities })) {
-      return cb({ error: 'Cannot consume' });
-    }
+    if (!router.canConsume({ producerId, rtpCapabilities })) return cb({ error: 'Cannot consume' });
 
-    // Find or create a transport for consuming
     let transport = peers.get(socket.id).transports.find(t => t.appData && t.appData.consuming);
     if (!transport) {
       transport = await router.createWebRtcTransport({
         listenIps: [{ ip: '0.0.0.0', announcedIp: 'webrtcserver.mmup.org' }],
-        enableUdp: true,
-        enableTcp: true,
-        preferUdp: true,
+        enableUdp: true, enableTcp: true, preferUdp: true,
         appData: { consuming: true }
       });
       peers.get(socket.id).transports.push(transport);
     }
-
     const consumer = await transport.consume({
-      producerId,
-      rtpCapabilities,
-      paused: false
+      producerId, rtpCapabilities, paused: false
     });
-
     peers.get(socket.id).consumers.push(consumer);
-
     cb({
-      id: consumer.id,
-      producerId,
-      kind: consumer.kind,
-      rtpParameters: consumer.rtpParameters
+      id: consumer.id, producerId, kind: consumer.kind, rtpParameters: consumer.rtpParameters
     });
   });
 
-  // Room join/approval logic
-  socket.on('join-room', ({ roomId, isOwnerCandidate }, cb) => {
-    console.log(`[join-room] socket: ${socket.id}, roomId: ${roomId}, isOwnerCandidate: ${isOwnerCandidate}`);
+  // -------- Fix: Room Owner role and Existing Producers --------
+  socket.on('join-room', ({ roomId }, cb) => {
     if (!rooms.has(roomId)) {
-      if (isOwnerCandidate) {
-        rooms.set(roomId, {
-          ownerId: socket.id,
-          participants: [socket.id],
-          waiting: [],
-          producers: [],
-        });
-        cb({ isOwner: true });
-        return;
-      }
+      // First join = owner
+      rooms.set(roomId, {
+        ownerId: socket.id,
+        participants: [socket.id],
+        waiting: [],
+        producers: [],
+      });
+      cb({ isOwner: true, existingProducers: [] });
+      return;
     }
-
     const room = rooms.get(roomId);
-    if (!room) {
-      return cb({ isOwner: false, waitForApproval: true });
-    }
-
-    room.waiting.push(socket.id);
+    if (!room.participants.includes(socket.id)) room.waiting.push(socket.id);
+    // Send join-request to owner
     const ownerSocket = io.sockets.sockets.get(room.ownerId);
-    if (ownerSocket) {
-      console.log(`[EMIT] join-request to owner: ${room.ownerId}, from guest: ${socket.id}`);
-      ownerSocket.emit('join-request', { socketId: socket.id });
-    } else {
-      console.log(`[ERROR] Owner socket not found for room: ${roomId}`);
-    }
-
+    if (ownerSocket) ownerSocket.emit('join-request', { socketId: socket.id });
     cb({ isOwner: false, waitForApproval: true });
   });
 
@@ -186,14 +146,11 @@ io.on('connection', socket => {
     const room = [...rooms.values()].find(r => r.ownerId === socket.id);
     if (room) {
       room.waiting = room.waiting.filter(id => id !== targetSocketId);
-      room.participants.push(targetSocketId);
-      io.to(targetSocketId).emit('join-approved');
-
-      // Send all current producers in the room to the newly joined participant
-      room.producers.forEach(({ producer, socketId }) => {
-        if (producer && producer.id) {
-          io.to(targetSocketId).emit('newProducer', { producerId: producer.id, socketId });
-        }
+      if (!room.participants.includes(targetSocketId)) room.participants.push(targetSocketId);
+      io.to(targetSocketId).emit('join-approved', {
+        existingProducers: (room.producers || []).filter(p => p.socketId !== targetSocketId).map(p => ({
+          producerId: p.producer.id, socketId: p.socketId
+        }))
       });
     }
   });
@@ -220,9 +177,7 @@ io.on('connection', socket => {
 
 function findRoomByParticipant(socketId) {
   for (const [roomId, room] of rooms.entries()) {
-    if (room.participants && room.participants.includes(socketId)) {
-      return roomId;
-    }
+    if (room.participants && room.participants.includes(socketId)) return roomId;
   }
   return null;
 }
