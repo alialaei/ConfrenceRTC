@@ -123,6 +123,10 @@ io.on('connection', socket => {
 
   // -------- Fix: Room Owner role and Existing Producers --------
   socket.on('join-room', ({ roomId }, cb) => {
+    if (ownerDisconnectTimers[roomId]) {
+      clearTimeout(ownerDisconnectTimers[roomId]);
+      delete ownerDisconnectTimers[roomId];
+    }
     if (!rooms.has(roomId)) {
       // First join = owner
       rooms.set(roomId, {
@@ -160,20 +164,26 @@ io.on('connection', socket => {
   });
 
   socket.on('disconnect', () => {
+   socket.on('disconnect', () => {
     let roomId = findRoomByParticipant(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
-      room.participants = room.participants.filter(id => id !== socket.id);
-      room.waiting = room.waiting.filter(id => id !== socket.id);
-      room.producers = (room.producers || []).filter(p => p.socketId !== socket.id);
+
+      // If the owner disconnects, start a timer instead of deleting instantly
       if (room.ownerId === socket.id) {
-        io.to(room.participants).emit('room-closed');
-        rooms.delete(roomId);
+        ownerDisconnectTimers[roomId] = setTimeout(() => {
+          io.to(room.participants).emit('room-closed');
+          rooms.delete(roomId);
+        }, 30000); // 30 seconds grace period (change as needed)
+      } else {
+        // For other users, just remove them immediately
+        room.participants = room.participants.filter(id => id !== socket.id);
+        room.waiting = room.waiting.filter(id => id !== socket.id);
+        room.producers = (room.producers || []).filter(p => p.socketId !== socket.id);
       }
     }
     peers.delete(socket.id);
   });
-});
 
 function findRoomByParticipant(socketId) {
   for (const [roomId, room] of rooms.entries()) {
