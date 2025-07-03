@@ -46,7 +46,7 @@ io.on('connection', socket => {
   socket.on('createTransport', async cb => {
     console.log(`[${socket.id}] createTransport`);
     const transport = await router.createWebRtcTransport({
-      listenIps: [{ ip: '0.0.0.0', announcedIp: 'webrtcserver.mmup.org' }],
+      listenIps: [{ ip: '0.0.0.0', announcedIp: '52.47.158.117' }],
       enableUdp: true, enableTcp: true, preferUdp: true
     });
     peers.get(socket.id).transports.push(transport);
