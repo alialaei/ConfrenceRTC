@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const path = require('path');
 const { Server } = require('socket.io');
@@ -5,13 +6,12 @@ const mediasoup = require('mediasoup');
 const http = require('http');
 const fallback = require('express-history-api-fallback');
 
-const rooms = new Map();
+const rooms = new Map(); // roomId -> { ownerId, participants: [socketId], producers: [{socketId, producer}] }
 const peers = new Map(); // socketId -> { transports, producers, consumers }
 const ownerDisconnectTimers = {};
 
 const app = express();
 const server = http.createServer(app);
-
 const io = new Server(server, {
   cors: {
     origin: ['https://conference.mmup.org'],
@@ -21,39 +21,22 @@ const io = new Server(server, {
 });
 
 const port = 3000;
-
-let worker;
-let router;
-
+let worker, router;
 const mediaCodecs = [
-  {
-    kind: 'audio',
-    mimeType: 'audio/opus',
-    clockRate: 48000,
-    channels: 2
-  },
-  {
-    kind: 'video',
-    mimeType: 'video/VP8',
-    clockRate: 90000
-  }
+  { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
+  { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 }
 ];
 
 (async () => {
   worker = await mediasoup.createWorker();
-  console.log('✅ mediasoup worker created');
-
   router = await worker.createRouter({ mediaCodecs });
-  console.log('✅ mediasoup router created');
-
-  server.listen(port, () => {
-    console.log(`✅ Server running on port ${port}`);
-  });
+  server.listen(port, () => console.log(`✅ Server running on port ${port}`));
 })();
 
 io.on('connection', socket => {
   peers.set(socket.id, { transports: [], producers: [], consumers: [] });
 
+  // === Mediasoup standard ===
   socket.on('getRouterRtpCapabilities', cb => cb(router.rtpCapabilities));
 
   socket.on('createTransport', async cb => {
@@ -86,16 +69,16 @@ io.on('connection', socket => {
     const producer = await transport.produce({ kind, rtpParameters });
     peers.get(socket.id).producers.push(producer);
 
-    // Add to room producers
     let roomId = findRoomByParticipant(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
-      if (!room.producers) room.producers = [];
       room.producers.push({ socketId: socket.id, producer });
 
-      // Broadcast to other participants
+      // Inform everyone else in the room about the new producer (not the producer themself!)
       room.participants.forEach(pid => {
-        if (pid !== socket.id) io.to(pid).emit('newProducer', { producerId: producer.id, socketId: socket.id });
+        if (pid !== socket.id) {
+          io.to(pid).emit('newProducer', { producerId: producer.id, socketId: socket.id });
+        }
       });
     }
     cb({ id: producer.id });
@@ -122,16 +105,15 @@ io.on('connection', socket => {
     });
   });
 
-  // -------- Fix: Room Owner role and Existing Producers --------
+  // ===== Room Logic =====
   socket.on('join-room', ({ roomId }, cb) => {
-    // Owner reconnected, clear the grace period timer
     if (ownerDisconnectTimers[roomId]) {
       clearTimeout(ownerDisconnectTimers[roomId]);
       delete ownerDisconnectTimers[roomId];
     }
 
     if (!rooms.has(roomId)) {
-      // First join = owner
+      // First user = owner
       rooms.set(roomId, {
         ownerId: socket.id,
         participants: [socket.id],
@@ -143,7 +125,6 @@ io.on('connection', socket => {
     }
     const room = rooms.get(roomId);
     if (!room.participants.includes(socket.id)) room.waiting.push(socket.id);
-    // Send join-request to owner
     const ownerSocket = io.sockets.sockets.get(room.ownerId);
     if (ownerSocket) ownerSocket.emit('join-request', { socketId: socket.id });
     cb({ isOwner: false, waitForApproval: true });
@@ -154,6 +135,7 @@ io.on('connection', socket => {
     if (room) {
       room.waiting = room.waiting.filter(id => id !== targetSocketId);
       if (!room.participants.includes(targetSocketId)) room.participants.push(targetSocketId);
+      // Only send other users' producers, never send own
       io.to(targetSocketId).emit('join-approved', {
         existingProducers: (room.producers || []).filter(p => p.socketId !== targetSocketId).map(p => ({
           producerId: p.producer.id, socketId: p.socketId
@@ -170,18 +152,18 @@ io.on('connection', socket => {
     let roomId = findRoomByParticipant(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
-
-      // If the owner disconnects, start a timer instead of deleting instantly
+      // Owner disconnects: 30s grace
       if (room.ownerId === socket.id) {
         ownerDisconnectTimers[roomId] = setTimeout(() => {
           io.to(room.participants).emit('room-closed');
           rooms.delete(roomId);
-        }, 30000); // 30 seconds grace period (change as needed)
+        }, 30000);
       } else {
-        // For other users, just remove them immediately
+        // Remove participant & their producers
         room.participants = room.participants.filter(id => id !== socket.id);
         room.waiting = room.waiting.filter(id => id !== socket.id);
         room.producers = (room.producers || []).filter(p => p.socketId !== socket.id);
+        // (optional: notify others someone left, for removing videos)
       }
     }
     peers.delete(socket.id);
@@ -195,7 +177,6 @@ function findRoomByParticipant(socketId) {
   return null;
 }
 
-// Static and fallback routing
 const root = path.join(__dirname, 'public');
 app.use(express.static(root));
 app.use(fallback('index.html', { root }));
