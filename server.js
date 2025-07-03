@@ -7,6 +7,7 @@ const fallback = require('express-history-api-fallback');
 
 const rooms = new Map();
 const peers = new Map(); // socketId -> { transports, producers, consumers }
+const ownerDisconnectTimers = {};
 
 const app = express();
 const server = http.createServer(app);
@@ -123,10 +124,12 @@ io.on('connection', socket => {
 
   // -------- Fix: Room Owner role and Existing Producers --------
   socket.on('join-room', ({ roomId }, cb) => {
+    // Owner reconnected, clear the grace period timer
     if (ownerDisconnectTimers[roomId]) {
       clearTimeout(ownerDisconnectTimers[roomId]);
       delete ownerDisconnectTimers[roomId];
     }
+
     if (!rooms.has(roomId)) {
       // First join = owner
       rooms.set(roomId, {
@@ -164,7 +167,6 @@ io.on('connection', socket => {
   });
 
   socket.on('disconnect', () => {
-   socket.on('disconnect', () => {
     let roomId = findRoomByParticipant(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
@@ -184,6 +186,7 @@ io.on('connection', socket => {
     }
     peers.delete(socket.id);
   });
+});
 
 function findRoomByParticipant(socketId) {
   for (const [roomId, room] of rooms.entries()) {
