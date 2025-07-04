@@ -16,8 +16,28 @@ const TURN_PASS   = process.env.TURN_PASS  || 'testpassword';
 const TURN_URL    = `turn:conference.mmup.org:3478?transport=udp`;
 
 const mediaCodecs = [
-  { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
-  { kind: 'video', mimeType: 'video/VP8',   clockRate: 90000 }
+  {   // ── Opus (all browsers) ───────────────────────────────────────
+    kind       : 'audio',
+    mimeType   : 'audio/opus',
+    clockRate  : 48_000,
+    channels   : 2
+  },
+  {   // ── VP8 (Chrome / Firefox / Edge) ─────────────────────────────
+    kind       : 'video',
+    mimeType   : 'video/VP8',
+    clockRate  : 90_000,
+    parameters : { 'x-google-start-bitrate': 1000 }
+  },
+  {   // ── H264 baseline (Safari & others) ───────────────────────────
+    kind       : 'video',
+    mimeType   : 'video/H264',
+    clockRate  : 90_000,
+    parameters : {
+      'packetization-mode'        : 1,
+      'level-asymmetry-allowed'   : 1,
+      'profile-level-id'          : '42e01f'   // baseline-3.1
+    }
+  }
 ];
 
 const ICE_SERVERS = [
