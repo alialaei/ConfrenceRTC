@@ -21,7 +21,10 @@ const mediaCodecs = [
 ];
 
 const ICE_SERVERS = [
-  { urls: [TURN_URL], username: TURN_USER, credential: TURN_PASS }
+    { urls: ['turn:conference.mmup.org:3478?transport=tcp'],
+        username: 'testuser', credential: 'testpassword' 
+    },
+    { urls: ['stun:stun.l.google.com:19302'] }
 ];
 
 const IO_OPTS = {
