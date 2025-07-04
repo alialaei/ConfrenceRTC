@@ -8,12 +8,9 @@ const fallback   = require('express-history-api-fallback');
 const { Server } = require('socket.io');
 const mediasoup  = require('mediasoup');
 
-/* ---------- helpers ------------------------------------------------ */
-const dbg = (...args) => console.log('[MS]', ...args);
-
 /* ---------- constants --------------------------------------------- */
-const PORT        = process.env.PORT       || 3000;
-const PUBLIC_IP   = process.env.PUBLIC_IP  || '52.47.158.117';
+const PORT      = process.env.PORT      || 3000;
+const PUBLIC_IP = process.env.PUBLIC_IP || '52.47.158.117';
 
 const mediaCodecs = [
   { kind:'audio', mimeType:'audio/opus', clockRate:48000, channels:2 },
@@ -88,39 +85,31 @@ io.on('connection', socket => {
     transport.on('dtlsstatechange', s => s === 'closed' && transport.close());
   });
 
-  socket.on('connectTransport', async ({ transportId, dtlsParameters }, ack = ()=>{}) => {
-    const t = peers.get(socket.id)?.transports.find(x => x.id === transportId);
-    if (!t) return ack({ error:'transport not found' });
-
-    if (!dtlsParameters?.fingerprints?.length)
-      return ack({ error:'bad dtlsParameters' });
-
-    try {
-      await t.connect({ dtlsParameters });
-      ack();                     // success
-    } catch (e) {
-      console.error(e);
-      ack({ error:e.message });
-    }
+  socket.on('connectTransport', async ({ transportId, dtlsParameters }, cb) => {
+    const t = peers.get(socket.id).transports.find(x => x.id === transportId);
+    if (!t) return cb({ error:'transport not found' });
+    await t.connect({ dtlsParameters });
+    cb();
   });
 
   // 2️⃣  Produce -----------------------------------------------------
-  socket.on('produce', async ({ transportId, kind, rtpParameters }, cb) => {
+  socket.on('produce', async ({ transportId, kind, rtpParameters, appData }, cb) => {
     const t = peers.get(socket.id).transports.find(x => x.id === transportId);
     if (!t) return cb({ error:'transport not found' });
 
-    const producer = await t.produce({ kind, rtpParameters });
+    const producer = await t.produce({ kind, rtpParameters, appData });
     peers.get(socket.id).producers.push(producer);
-    dbg('produce', kind, producer.id.slice(0,6));
 
     const roomId = roomOf(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
       room.producers.push({ socketId:socket.id, producer });
+      const mediaTag = producer.appData?.mediaTag;
       room.participants
         .filter(id => id !== socket.id)
-        .forEach(id => io.to(id).emit('newProducer',
-          { producerId:producer.id, socketId:socket.id }));
+        .forEach(id =>
+          io.to(id).emit('newProducer',
+            { producerId:producer.id, socketId:socket.id, mediaTag }));
     }
     cb({ id:producer.id });
   });
@@ -135,11 +124,13 @@ io.on('connection', socket => {
 
     const consumer = await t.consume({ producerId, rtpCapabilities, paused:false });
     peers.get(socket.id).consumers.push(consumer);
-    dbg('consume', consumer.kind, 'from', producerId.slice(0,6));
 
     cb({
-      id:consumer.id, producerId, kind:consumer.kind,
-      rtpParameters:consumer.rtpParameters
+      id           : consumer.id,
+      producerId,
+      kind         : consumer.kind,
+      rtpParameters: consumer.rtpParameters,
+      mediaTag     : consumer.appData.mediaTag   // ← pass tag to client
     });
   });
 
@@ -169,7 +160,11 @@ io.on('connection', socket => {
     io.to(targetSocketId).emit('join-approved', {
       existingProducers: room.producers
         .filter(p => p.socketId !== targetSocketId)
-        .map(p => ({ producerId:p.producer.id, socketId:p.socketId }))
+        .map(p => ({
+          producerId:p.producer.id,
+          socketId  :p.socketId,
+          mediaTag  :p.producer.appData.mediaTag   // ← tag for late joiner
+        }))
     });
   });
 
@@ -189,7 +184,7 @@ io.on('connection', socket => {
     } else {
       room.participants = room.participants.filter(id => id !== socket.id);
       room.producers    = room.producers.filter(p => p.socketId !== socket.id);
-      io.to(room.participants).emit('participant-left', { socketId: socket.id });
+      io.to(room.participants).emit('participant-left', { socketId:socket.id });
     }
     peers.delete(socket.id);
   });
