@@ -88,11 +88,20 @@ io.on('connection', socket => {
     transport.on('dtlsstatechange', s => s === 'closed' && transport.close());
   });
 
-  socket.on('connectTransport', async ({ transportId, dtlsParameters }, cb) => {
-    const t = peers.get(socket.id).transports.find(x => x.id === transportId);
-    if (!t) return cb({ error:'transport not found' });
-    await t.connect({ dtlsParameters });
-    cb();
+  socket.on('connectTransport', async ({ transportId, dtlsParameters }, ack = ()=>{}) => {
+    const t = peers.get(socket.id)?.transports.find(x => x.id === transportId);
+    if (!t) return ack({ error:'transport not found' });
+
+    if (!dtlsParameters?.fingerprints?.length)
+      return ack({ error:'bad dtlsParameters' });
+
+    try {
+      await t.connect({ dtlsParameters });
+      ack();                     // success
+    } catch (e) {
+      console.error(e);
+      ack({ error:e.message });
+    }
   });
 
   // 2️⃣  Produce -----------------------------------------------------
