@@ -189,6 +189,7 @@ io.on('connection', socket => {
     } else {
       room.participants = room.participants.filter(id => id !== socket.id);
       room.producers    = room.producers.filter(p => p.socketId !== socket.id);
+      io.to(room.participants).emit('participant-left', { socketId: socket.id });
     }
     peers.delete(socket.id);
   });
