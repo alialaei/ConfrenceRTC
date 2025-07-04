@@ -8,63 +8,43 @@ const fallback   = require('express-history-api-fallback');
 const { Server } = require('socket.io');
 const mediasoup  = require('mediasoup');
 
+/* ---------- helpers ------------------------------------------------ */
+const dbg = (...args) => console.log('[MS]', ...args);
+
 /* ---------- constants --------------------------------------------- */
 const PORT        = process.env.PORT       || 3000;
 const PUBLIC_IP   = process.env.PUBLIC_IP  || '52.47.158.117';
-const TURN_USER   = process.env.TURN_USER  || 'testuser';
-const TURN_PASS   = process.env.TURN_PASS  || 'testpassword';
-const TURN_URL    = `turn:conference.mmup.org:3478?transport=udp`;
 
 const mediaCodecs = [
-  {   // ── Opus (all browsers) ───────────────────────────────────────
-    kind       : 'audio',
-    mimeType   : 'audio/opus',
-    clockRate  : 48_000,
-    channels   : 2
-  },
-  {   // ── VP8 (Chrome / Firefox / Edge) ─────────────────────────────
-    kind       : 'video',
-    mimeType   : 'video/VP8',
-    clockRate  : 90_000,
-    parameters : { 'x-google-start-bitrate': 1000 }
-  },
-  {   // ── H264 baseline (Safari & others) ───────────────────────────
-    kind       : 'video',
-    mimeType   : 'video/H264',
-    clockRate  : 90_000,
-    parameters : {
-      'packetization-mode'        : 1,
-      'level-asymmetry-allowed'   : 1,
-      'profile-level-id'          : '42e01f'   // baseline-3.1
-    }
-  }
+  { kind:'audio', mimeType:'audio/opus', clockRate:48000, channels:2 },
+  { kind:'video', mimeType:'video/VP8',  clockRate:90000,
+    parameters:{ 'x-google-start-bitrate':1000 } },
+  { kind:'video', mimeType:'video/H264', clockRate:90000,
+    parameters:{ 'packetization-mode':1, 'level-asymmetry-allowed':1,
+                 'profile-level-id':'42e01f' } }
 ];
 
 const ICE_SERVERS = [
-    { urls: ['turn:conference.mmup.org:3478?transport=tcp'],
-        username: 'testuser', credential: 'testpassword' 
-    },
-    { urls: ['stun:stun.l.google.com:19302'] }
+  { urls:'turn:conference.mmup.org:3478?transport=tcp',
+    username:'testuser', credential:'testpassword' },
+  { urls:'stun:stun.l.google.com:19302' }
 ];
 
 const IO_OPTS = {
-  listenIps  : [{ ip: '0.0.0.0', announcedIp: PUBLIC_IP }],
-  enableUdp  : true,
-  enableTcp  : true,
-  preferUdp  : true,
-  iceServers : ICE_SERVERS
+  listenIps : [{ ip:'0.0.0.0', announcedIp:PUBLIC_IP }],
+  enableUdp : true, enableTcp:true, preferUdp:true,
+  iceServers: ICE_SERVERS
 };
 
 /* ---------- express ------------------------------------------------ */
 const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, {
-  cors: { origin: ['https://conference.mmup.org'], credentials: true }
+  cors:{ origin:['https://conference.mmup.org'], credentials:true }
 });
-
 const ROOT = path.join(__dirname, 'public');
 app.use(express.static(ROOT));
-app.use(fallback('index.html', { root: ROOT }));
+app.use(fallback('index.html', { root:ROOT }));
 
 /* ---------- mediasoup bootstrap ------------------------------------ */
 let worker, router;
@@ -74,10 +54,10 @@ let worker, router;
   server.listen(PORT, () => console.log(`✅  Server listening on :${PORT}`));
 })();
 
-/* ---------- in-memory state ---------------------------------------- */
-const rooms = new Map();  // roomId -> { ownerId, participants[], producers[] }
-const peers = new Map();  // socketId -> { transports[], producers[], consumers[] }
-const timers = new Map(); // roomId  -> disconnectTimeoutId
+/* ---------- in-memory state --------------------------------------- */
+const rooms  = new Map();      // roomId → { ownerId, participants[], producers[] }
+const peers  = new Map();      // socketId → { transports[], producers[], consumers[] }
+const timers = new Map();      // roomId  → timeoutId
 
 const roomOf = id =>
   [...rooms.entries()].find(([, r]) => r.participants.includes(id))?.[0] ?? null;
@@ -85,17 +65,20 @@ const roomOf = id =>
 /* ---------- socket.io flow ---------------------------------------- */
 io.on('connection', socket => {
   console.log('🔌', socket.id, 'connected');
-  peers.set(socket.id, { transports: [], producers: [], consumers: [] });
+  peers.set(socket.id, { transports:[], producers:[], consumers:[] });
 
-  /* ---- mediasoup primitives --------------------------------------- */
+  /* ---- mediasoup primitives -------------------------------------- */
   socket.on('getRouterRtpCapabilities', cb => cb(router.rtpCapabilities));
 
-  socket.on('createTransport', async cb => {
-    const transport = await router.createWebRtcTransport(IO_OPTS);
+  // 1️⃣  create send/recv transports (client passes {consuming:true} for recv)
+  socket.on('createTransport', async ({ consuming = false } = {}, cb) => {
+    const transport = await router.createWebRtcTransport({
+      ...IO_OPTS, appData:{ consuming }
+    });
     peers.get(socket.id).transports.push(transport);
 
     cb({
-      id            : transport.id,
+      id:transport.id,
       iceParameters : transport.iceParameters,
       iceCandidates : transport.iceCandidates,
       dtlsParameters: transport.dtlsParameters,
@@ -106,64 +89,65 @@ io.on('connection', socket => {
   });
 
   socket.on('connectTransport', async ({ transportId, dtlsParameters }, cb) => {
-    if (!dtlsParameters?.fingerprints?.length)
-      return cb({ error: 'bad dtlsParameters' });
-
     const t = peers.get(socket.id).transports.find(x => x.id === transportId);
-    if (!t) return cb({ error: 'transport not found' });
+    if (!t) return cb({ error:'transport not found' });
     await t.connect({ dtlsParameters });
     cb();
   });
 
+  // 2️⃣  Produce -----------------------------------------------------
   socket.on('produce', async ({ transportId, kind, rtpParameters }, cb) => {
     const t = peers.get(socket.id).transports.find(x => x.id === transportId);
-    if (!t) return cb({ error: 'transport not found' });
+    if (!t) return cb({ error:'transport not found' });
 
     const producer = await t.produce({ kind, rtpParameters });
     peers.get(socket.id).producers.push(producer);
+    dbg('produce', kind, producer.id.slice(0,6));
 
     const roomId = roomOf(socket.id);
     if (roomId) {
       const room = rooms.get(roomId);
-      room.producers.push({ socketId: socket.id, producer });
+      room.producers.push({ socketId:socket.id, producer });
       room.participants
         .filter(id => id !== socket.id)
         .forEach(id => io.to(id).emit('newProducer',
-          { producerId: producer.id, socketId: socket.id }));
+          { producerId:producer.id, socketId:socket.id }));
     }
-    cb({ id: producer.id });
+    cb({ id:producer.id });
   });
 
+  // 3️⃣  Consume -----------------------------------------------------
   socket.on('consume', async ({ producerId, rtpCapabilities }, cb) => {
-    if (!router.canConsume({ producerId, rtpCapabilities }))
-      return cb({ error: 'cannot consume' });
+    const t = peers.get(socket.id).transports.find(x => x.appData.consuming);
+    if (!t) return cb({ error:'no recv transport' });
 
-    let t = peers.get(socket.id).transports.find(x => x.appData?.consuming);
-    if (!t) {
-      t = await router.createWebRtcTransport({ ...IO_OPTS, appData: { consuming: true } });
-      peers.get(socket.id).transports.push(t);
-    }
-    const consumer = await t.consume({ producerId, rtpCapabilities, paused: false });
+    if (!router.canConsume({ producerId, rtpCapabilities }))
+      return cb({ error:'cannot consume' });
+
+    const consumer = await t.consume({ producerId, rtpCapabilities, paused:false });
     peers.get(socket.id).consumers.push(consumer);
+    dbg('consume', consumer.kind, 'from', producerId.slice(0,6));
+
     cb({
-      id: consumer.id, producerId, kind: consumer.kind, rtpParameters: consumer.rtpParameters
+      id:consumer.id, producerId, kind:consumer.kind,
+      rtpParameters:consumer.rtpParameters
     });
   });
 
-  /* ---- room orchestration ----------------------------------------- */
+  /* ---- room orchestration ---------------------------------------- */
   socket.on('join-room', ({ roomId }, cb) => {
     if (timers.has(roomId)) clearTimeout(timers.get(roomId));
 
     if (!rooms.has(roomId)) {
-      rooms.set(roomId, { ownerId: socket.id, participants: [socket.id],
-                          waiting: [], producers: [] });
-      return cb({ isOwner: true, existingProducers: [] });
+      rooms.set(roomId, { ownerId:socket.id, participants:[socket.id],
+                          waiting:[], producers:[] });
+      return cb({ isOwner:true, existingProducers:[] });
     }
 
     const room = rooms.get(roomId);
     room.waiting.push(socket.id);
-    io.to(room.ownerId).emit('join-request', { socketId: socket.id });
-    cb({ isOwner: false, waitForApproval: true });
+    io.to(room.ownerId).emit('join-request', { socketId:socket.id });
+    cb({ isOwner:false, waitForApproval:true });
   });
 
   socket.on('approve-join', ({ targetSocketId }) => {
@@ -176,7 +160,7 @@ io.on('connection', socket => {
     io.to(targetSocketId).emit('join-approved', {
       existingProducers: room.producers
         .filter(p => p.socketId !== targetSocketId)
-        .map(p => ({ producerId: p.producer.id, socketId: p.socketId }))
+        .map(p => ({ producerId:p.producer.id, socketId:p.socketId }))
     });
   });
 
