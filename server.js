@@ -114,6 +114,17 @@ io.on('connection', socket => {
     cb({ id:producer.id });
   });
 
+  socket.on('stop-screen', () => {
+    const roomId = roomOf(socket.id);
+    if (!roomId) return;
+    const room = rooms.get(roomId);
+
+    // broadcast to all participants except the sender
+    room.participants
+        .filter(id => id !== socket.id)
+        .forEach(id => io.to(id).emit('screen-stopped'));
+  });
+
   // 3️⃣  Consume -----------------------------------------------------
   socket.on('consume', async ({ producerId, rtpCapabilities }, cb) => {
     const t = peers.get(socket.id).transports.find(x => x.appData.consuming);
