@@ -2,8 +2,10 @@
 /*  Simple mediasoup + socket.io room server                          */
 /* ------------------------------------------------------------------ */
 const path       = require('path');
+const fs         = require('fs');
 const http       = require('http');
 const express    = require('express');
+const multer     = require('multer');
 const fallback   = require('express-history-api-fallback');
 const { Server } = require('socket.io');
 const mediasoup  = require('mediasoup');
@@ -11,6 +13,12 @@ const mediasoup  = require('mediasoup');
 /* ---------- constants --------------------------------------------- */
 const PORT      = process.env.PORT      || 3000;
 const PUBLIC_IP = process.env.PUBLIC_IP || '52.47.158.117';
+
+
+/* ---------- PDF upload -------------------------------------------- */
+const UPLOAD_DIR = path.join(__dirname, 'public', 'uploads');
+fs.mkdirSync(UPLOAD_DIR, { recursive:true });
+const upload = multer({ dest: UPLOAD_DIR });
 
 const mediaCodecs = [
   { kind:'audio', mimeType:'audio/opus', clockRate:48000, channels:2 },
@@ -36,12 +44,19 @@ const IO_OPTS = {
 /* ---------- express ------------------------------------------------ */
 const app    = express();
 const server = http.createServer(app);
-const io     = new Server(server, {
-  cors:{ origin:['https://conference.mmup.org'], credentials:true }
-});
+const io     = new Server(server, { cors:{ origin:['https://conference.mmup.org'], credentials:true } });
+
 const ROOT = path.join(__dirname, 'public');
-app.use(express.static(ROOT));
+app.use(express.static(ROOT));                     // [/public/**]
 app.use(fallback('index.html', { root:ROOT }));
+
+/* --- NEW: upload endpoint ---------------------------------------- */
+app.post('/upload/pdf', upload.single('file'), (req, res) => {
+  // rename to keep original filename (spaces → _)
+  const safeName = Date.now() + '_' + req.file.originalname.replace(/\s+/g,'_');
+  fs.renameSync(req.file.path, path.join(UPLOAD_DIR, safeName));
+  res.json({ url:`/uploads/${safeName}`, name:req.file.originalname });
+});
 
 /* ---------- mediasoup bootstrap ------------------------------------ */
 let worker, router;
@@ -55,12 +70,11 @@ let worker, router;
 const rooms  = new Map();      // roomId → { ownerId, participants[], producers[] }
 const peers  = new Map();      // socketId → { transports[], producers[], consumers[] }
 const timers = new Map();      // roomId  → timeoutId
+const codeStore = new Map();
 
 const roomOf = id =>
   [...rooms.entries()].find(([, r]) => r.participants.includes(id))?.[0] ?? null;
 
-/* ---------- code store for IDE ------------------------------------- */
-const codeStore = new Map();   // roomId → code text
 
 /* ---------- socket.io flow ---------------------------------------- */
 io.on('connection', socket => {
@@ -218,4 +232,22 @@ io.on('connection', socket => {
     codeStore.set(roomId, text);
     io.to(roomId).emit('code-update', { text });   // broadcast to *everyone* in room
   });
+
+  /* ---------- 🗨️  chat ------------------------------------------ */
+  socket.on('chat-send', ({ roomId, text, from }) => {
+    io.to(roomId).emit('chat-recv', { text, from });
+  });
+
+  /* ---------- 📄  PDF share -------------------------------------- */
+  socket.on('pdf-share', ({ roomId, url, name }) => {
+    io.to(roomId).emit('pdf-recv', { url, name });
+  });
+
+  /* ---------- collaborative IDE handlers (unchanged) ------------- */
+  socket.on('code-get',  ({ roomId }, cb)=> cb(codeStore.get(roomId) ?? ''));
+  socket.on('code-set',  ({ roomId, text }) => {
+    codeStore.set(roomId, text);
+    io.to(roomId).emit('code-update', { text });
+  });
+
 });
