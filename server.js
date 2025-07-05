@@ -59,12 +59,16 @@ const timers = new Map();      // roomId  → timeoutId
 const roomOf = id =>
   [...rooms.entries()].find(([, r]) => r.participants.includes(id))?.[0] ?? null;
 
+/* ---------- code store for IDE ------------------------------------- */
+const codeStore = new Map();   // roomId → code text
+
 /* ---------- socket.io flow ---------------------------------------- */
 io.on('connection', socket => {
   console.log('🔌', socket.id, 'connected');
   peers.set(socket.id, { transports:[], producers:[], consumers:[] });
+  socket.roomId = null;               // track which room the socket finally joins
 
-  /* ---- mediasoup primitives -------------------------------------- */
+  /* ---- mediasoup primitives ------------------------------------ */
   socket.on('getRouterRtpCapabilities', cb => cb(router.rtpCapabilities));
 
   // 1️⃣  create send/recv transports (client passes {consuming:true} for recv)
@@ -92,7 +96,7 @@ io.on('connection', socket => {
     cb();
   });
 
-  // 2️⃣  Produce -----------------------------------------------------
+  // 2️⃣  Produce ---------------------------------------------------
   socket.on('produce', async ({ transportId, kind, rtpParameters, appData }, cb) => {
     const t = peers.get(socket.id).transports.find(x => x.id === transportId);
     if (!t) return cb({ error:'transport not found' });
@@ -100,7 +104,7 @@ io.on('connection', socket => {
     const producer = await t.produce({ kind, rtpParameters, appData });
     peers.get(socket.id).producers.push(producer);
 
-    const roomId = roomOf(socket.id);
+    const roomId = socket.roomId;
     if (roomId) {
       const room = rooms.get(roomId);
       room.producers.push({ socketId:socket.id, producer });
@@ -115,17 +119,16 @@ io.on('connection', socket => {
   });
 
   socket.on('stop-screen', () => {
-    const roomId = roomOf(socket.id);
+    const roomId = socket.roomId;
     if (!roomId) return;
     const room = rooms.get(roomId);
 
-    // broadcast to all participants except the sender
     room.participants
         .filter(id => id !== socket.id)
         .forEach(id => io.to(id).emit('screen-stopped'));
   });
 
-  // 3️⃣  Consume -----------------------------------------------------
+  // 3️⃣  Consume ---------------------------------------------------
   socket.on('consume', async ({ producerId, rtpCapabilities }, cb) => {
     const t = peers.get(socket.id).transports.find(x => x.appData.consuming);
     if (!t) return cb({ error:'no recv transport' });
@@ -141,17 +144,19 @@ io.on('connection', socket => {
       producerId,
       kind         : consumer.kind,
       rtpParameters: consumer.rtpParameters,
-      mediaTag     : consumer.appData.mediaTag   // ← pass tag to client
+      mediaTag     : consumer.appData.mediaTag
     });
   });
 
-  /* ---- room orchestration ---------------------------------------- */
+  /* ---- room orchestration -------------------------------------- */
   socket.on('join-room', ({ roomId }, cb) => {
     if (timers.has(roomId)) clearTimeout(timers.get(roomId));
 
+    // first user becomes owner
     if (!rooms.has(roomId)) {
-      rooms.set(roomId, { ownerId:socket.id, participants:[socket.id],
-                          waiting:[], producers:[] });
+      rooms.set(roomId, { ownerId:socket.id, participants:[socket.id], waiting:[], producers:[] });
+      socket.roomId = roomId;      // remember
+      socket.join(roomId);         // join Socket.IO room right away
       return cb({ isOwner:true, existingProducers:[] });
     }
 
@@ -162,7 +167,7 @@ io.on('connection', socket => {
   });
 
   socket.on('approve-join', ({ targetSocketId }) => {
-    const roomId = roomOf(socket.id); if (!roomId) return;
+    const roomId = socket.roomId; if (!roomId) return;
     const room   = rooms.get(roomId);
 
     room.waiting      = room.waiting.filter(id => id !== targetSocketId);
@@ -171,22 +176,26 @@ io.on('connection', socket => {
     io.to(targetSocketId).emit('join-approved', {
       existingProducers: room.producers
         .filter(p => p.socketId !== targetSocketId)
-        .map(p => ({
-          producerId:p.producer.id,
-          socketId  :p.socketId,
-          mediaTag  :p.producer.appData.mediaTag   // ← tag for late joiner
-        }))
+        .map(p => ({ producerId:p.producer.id, socketId:p.socketId, mediaTag:p.producer.appData.mediaTag }))
     });
+
+    const target = io.sockets.sockets.get(targetSocketId);
+    if (target) {
+      target.roomId = roomId;
+      target.join(roomId);
+    }
   });
 
   socket.on('deny-join', ({ targetSocketId }) =>
     io.to(targetSocketId).emit('join-denied'));
 
   socket.on('disconnect', () => {
-    const roomId = roomOf(socket.id);
+    const roomId = socket.roomId;
     if (!roomId) return peers.delete(socket.id);
 
     const room = rooms.get(roomId);
+    if (!room) return peers.delete(socket.id);
+
     if (socket.id === room.ownerId) {
       timers.set(roomId, setTimeout(() => {
         io.to(room.participants).emit('room-closed');
@@ -198,5 +207,15 @@ io.on('connection', socket => {
       io.to(room.participants).emit('participant-left', { socketId:socket.id });
     }
     peers.delete(socket.id);
+  });
+
+  /* ---- collaborative IDE --------------------------------------- */
+  socket.on('code-get', ({ roomId }, cb) => {
+    cb(codeStore.get(roomId) ?? '');
+  });
+
+  socket.on('code-set', ({ roomId, text }) => {
+    codeStore.set(roomId, text);
+    io.to(roomId).emit('code-update', { text });   // broadcast to *everyone* in room
   });
 });
