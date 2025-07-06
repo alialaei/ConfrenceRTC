@@ -12,15 +12,26 @@ const { Server } = require('socket.io');
 const fallback  = require('express-history-api-fallback');
 const mediasoup = require('mediasoup');
 
+const authRouter = require('./services/auth'); // import auth router factory
+
 /* ---------- config ------------------------------------------------ */
 const PORT      = process.env.PORT      || 3000;
 const PUBLIC_IP = process.env.PUBLIC_IP || process.env.PUBLIC_IP_FALLBACK || '0.0.0.0';
 
 /* ---------- Mongo ------------------------------------------------- */
-mongoose.connect(process.env.MONGO_URL, {
-  useNewUrlParser:true, useUnifiedTopology:true
-}).then(()=>console.log('✅  Mongo connected'))
-  .catch(e=>{console.error(e);process.exit(1);});
+const mongoose = require('mongoose');
+
+mongoose
+  .connect(process.env.MONGO_URL || 'mongodb://127.0.0.1:27017/webrtc', {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  })
+  .then(() => console.log('✅  Mongo connected'))
+  .catch((err) => {
+    console.error('❌  Mongo connection failed', err);
+    process.exit(1);
+  });
+
 
 /* ---------- Redis ------------------------------------------------- */
 const redis = createClient({ url: process.env.REDIS_URL });
@@ -55,6 +66,7 @@ const UPLOAD_DIR = path.join(ROOT, 'uploads');
 fs.mkdirSync(UPLOAD_DIR, { recursive:true });
 
 const app = express();
+app.use(express.json());
 const upload = multer({ dest: UPLOAD_DIR });
 
 app.use(express.static(ROOT));                // serves /uploads/** too
@@ -65,8 +77,7 @@ app.post('/upload/pdf', upload.single('file'), (req,res)=>{
 });
 app.use(fallback('index.html', { root:ROOT }));
 
-const authRouter = require('./services/auth');
-app.use(express.json());
+/* ---------- auth router ------------------------------------------- */
 app.use('/api/auth', authRouter()); 
 
 const server = http.createServer(app);
