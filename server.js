@@ -16,6 +16,12 @@ const mediasoup = require('mediasoup');
 const PORT      = process.env.PORT      || 3000;
 const PUBLIC_IP = process.env.PUBLIC_IP || process.env.PUBLIC_IP_FALLBACK || '0.0.0.0';
 
+/* ---------- Mongo ------------------------------------------------- */
+mongoose.connect(process.env.MONGO_URL, {
+  useNewUrlParser:true, useUnifiedTopology:true
+}).then(()=>console.log('✅  Mongo connected'))
+  .catch(e=>{console.error(e);process.exit(1);});
+
 /* ---------- Redis ------------------------------------------------- */
 const redis = createClient({ url: process.env.REDIS_URL });
 redis.connect().catch(console.error);
@@ -58,6 +64,10 @@ app.post('/upload/pdf', upload.single('file'), (req,res)=>{
   res.json({ url:`/uploads/${safe}`, name:req.file.originalname });
 });
 app.use(fallback('index.html', { root:ROOT }));
+
+const authRouter = require('./services/auth');
+app.use(express.json());
+app.use('/api/auth', authRouter()); 
 
 const server = http.createServer(app);
 const io     = new Server(server, { cors:{origin:['https://conference.mmup.org'],credentials:true}});
