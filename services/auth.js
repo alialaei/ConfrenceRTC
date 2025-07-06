@@ -83,17 +83,25 @@ module.exports = function authRouter () {
 
     /* ---------- helper: JWT verify ------------ */
     function verifyToken(req, res, next) {
-    const hdr = req.headers.authorization || '';
-    const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
-    if (!token) return res.status(401).end();
+        const hdr = req.headers.authorization || '';
+        const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+        if (!token) return res.status(401).end();
+        try {
+            const decoded = jwt.verify(token, JWT_SECRET);
+            req.user = decoded;
+            next();
+        } catch (_) {
+            res.status(401).end();
+        }
+    }
+  router.get('/me', verifyToken, async (req, res) => {
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        req.user = decoded;
-        next();
-    } catch (_) {
-        res.status(401).end();
-    }
-    }
+      const user = await User.findById(req.user.id).lean();
+      if (!user) return res.status(404).end();
+      delete user.password;                // never expose hash
+      res.json(user);
+    } catch (err) { console.error(err); res.status(500).end(); }
+  });
 
   return router;
 };
