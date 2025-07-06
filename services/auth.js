@@ -3,6 +3,9 @@ const express  = require('express');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
 const mongoose = require('mongoose');
+const multer   = require('multer');
+const upload   = multer({ dest: '/tmp' });
+const { putAvatar, deleteAvatar } = require('./s3'); // S3 helpers
 
 const { JWT_SECRET, JWT_EXPIRES = '30d' } = process.env;
 
@@ -51,6 +54,46 @@ module.exports = function authRouter () {
       res.json({ token, user:{ id:user._id, email:user.email, name:user.name, avatar:user.avatar }});
     }catch(err){ console.error(err); res.status(500).end(); }
   });
+
+  /* ─────────── UPDATE AVATAR ──────────── */
+    router.put(
+    '/profile/avatar',
+    verifyToken,                      // <-- add a simple JWT-check middleware (below)
+    upload.single('avatar'),
+    async (req, res) => {
+        try {
+        if (!req.file) return res.status(400).json({ msg: 'file missing' });
+
+        // push to S3
+        const url = await putAvatar(req.file);
+
+        // update user doc (and delete old if present)
+        const user = await User.findById(req.user.id);
+        if (user.avatar) await deleteAvatar(user.avatar);
+        user.avatar = url;
+        await user.save();
+
+        res.json({ avatar: url });
+        } catch (err) {
+        console.error(err);
+        res.status(500).end();
+        }
+    }
+    );
+
+    /* ---------- helper: JWT verify ------------ */
+    function verifyToken(req, res, next) {
+    const hdr = req.headers.authorization || '';
+    const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+    if (!token) return res.status(401).end();
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.user = decoded;
+        next();
+    } catch (_) {
+        res.status(401).end();
+    }
+    }
 
   return router;
 };
