@@ -1,22 +1,29 @@
 /* ------------------------------------------------------------------ */
 /*  mediasoup + socket.io + PDF-upload + chat + CodePad               */
 /* ------------------------------------------------------------------ */
+require('dotenv').config();
 const path    = require('path');
 const fs      = require('fs');
 const http    = require('http');
 const express = require('express');
 const multer  = require('multer');
+const { createClient } = require('redis');
 const { Server } = require('socket.io');
 const fallback  = require('express-history-api-fallback');
 const mediasoup = require('mediasoup');
 
 /* ---------- config ------------------------------------------------ */
 const PORT      = process.env.PORT      || 3000;
-const PUBLIC_IP = process.env.PUBLIC_IP || '52.47.158.117';
+const PUBLIC_IP = process.env.PUBLIC_IP || process.env.PUBLIC_IP_FALLBACK || '0.0.0.0';
 
+/* ---------- Redis ------------------------------------------------- */
+const redis = createClient({ url: process.env.REDIS_URL });
+redis.connect().catch(console.error);
+
+/* ---------- TURN / STUN & mediasoup codecs ----------------------- */
 const ICE_SERVERS = [
-  { urls:'turn:conference.mmup.org:3478?transport=tcp',
-    username:'testuser', credential:'testpassword' },
+  { urls: process.env.TURN_URLS,
+    username: process.env.TURN_USER, credential: process.env.TURN_PASS },
   { urls:'stun:stun.l.google.com:19302' }
 ];
 
@@ -75,10 +82,10 @@ const safeJoin = (sock, roomId) => {
   sock.join(roomId);
   sock.roomId = roomId;
 };
+const redisKey = rid => `room:${rid}`;
 
 /* ---------- socket.io flow --------------------------------------- */
 io.on('connection', socket=>{
-  console.log('🔌',socket.id);
   peers.set(socket.id,{ transports:[],producers:[],consumers:[] });
 
   /* mediasoup primitives ---------------------------------------- */
@@ -136,21 +143,33 @@ io.on('connection', socket=>{
   });
 
   /* room orchestration ------------------------------------------ */
-  socket.on('join-room',({roomId},cb)=>{
-    if(timers.has(roomId)) clearTimeout(timers.get(roomId));
+  socket.on('join-room', async({roomId},cb)=>{
+    /* ---- 1. uniqueness check via Redis ---- */
+    const exists = await redis.exists(redisKey(roomId));
+    if (!rooms.has(roomId) && exists) {
+      return cb({ exists:true });              // front-end should handle “already taken”
+    }
 
-    if(!rooms.has(roomId)){                 // first user ⇒ owner
-      rooms.set(roomId,{ ownerId:socket.id, participants:[socket.id],
-                         waiting:[], producers:[] });
+    /* ---- 2. create / join logic (almost the same as before) ---- */
+    if(!rooms.has(roomId)){                    // first user ⇒ owner
+      /* reserve URL in redis (no expiry while room is alive) */
+      await redis.set(redisKey(roomId), socket.id);
+
+      rooms.set(roomId,{
+        ownerId:socket.id, participants:[socket.id],
+        waiting:[], producers:[], muted:new Set()        // ← mute list
+      });
       safeJoin(socket,roomId);
       return cb({isOwner:true,existingProducers:[]});
     }
 
+    /* room exists – same flow as before */
     const room = rooms.get(roomId);
     room.waiting.push(socket.id);
     io.to(room.ownerId).emit('join-request',{socketId:socket.id});
     cb({isOwner:false,waitForApproval:true});
   });
+
 
   socket.on('approve-join',({targetSocketId})=>{
     const roomId = socket.roomId; if(!roomId) return;
@@ -173,7 +192,7 @@ io.on('connection', socket=>{
 
   socket.on('deny-join',({targetSocketId})=>io.to(targetSocketId).emit('join-denied'));
 
-  socket.on('disconnect',()=>{
+  socket.on('disconnect', async ()=>{
     const roomId = socket.roomId;
     if(!roomId){ peers.delete(socket.id); return; }
 
@@ -181,9 +200,10 @@ io.on('connection', socket=>{
     if(!room){ peers.delete(socket.id); return; }
 
     if(socket.id === room.ownerId){
-      timers.set(roomId,setTimeout(()=>{
+      timers.set(roomId,setTimeout(async ()=>{
         io.to(roomId).emit('room-closed');
         rooms.delete(roomId);
+        await redis.del(redisKey(roomId));          // remove reservation ✔
       },30_000));
     }else{
       room.participants = room.participants.filter(id=>id!==socket.id);
@@ -201,7 +221,22 @@ io.on('connection', socket=>{
   });
 
   /* chat ---------------------------------------------------------- */
+  /* ---------- chat control --------------------------------------- */
+  socket.on('chat-toggle', ({ targetId, enable })=>{
+    const roomId = socket.roomId;
+    if(!roomId) return;
+    const room = rooms.get(roomId);
+    if(socket.id !== room.ownerId) return;      // only owner may toggle
+
+    if(enable)  room.muted.delete(targetId);
+    else        room.muted.add(targetId);
+    io.to(targetId).emit('chat-perm', { enabled:enable });
+  });
+
   socket.on('chat-send',({roomId,text,from})=>{
+    const room = rooms.get(roomId);
+    if(!room) return;
+    if(room.muted.has(socket.id)) return;       // message ignored
     io.to(roomId).emit('chat-recv',{text,from});
   });
 
