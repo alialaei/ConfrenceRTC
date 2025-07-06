@@ -94,7 +94,7 @@ module.exports = function authRouter () {
             res.status(401).end();
         }
     }
-  router.get('/me', verifyToken, async (req, res) => {
+  router.get('/profile', verifyToken, async (req, res) => {
     try {
       const user = await User.findById(req.user.id).lean();
       if (!user) return res.status(404).end();
