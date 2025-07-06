@@ -21,14 +21,10 @@ const PUBLIC_IP = process.env.PUBLIC_IP || process.env.PUBLIC_IP_FALLBACK || '0.
 /* ---------- Mongo ------------------------------------------------- */
 const mongoose = require('mongoose');
 
-mongoose
-  .connect(process.env.MONGO_URL || 'mongodb://127.0.0.1:27017/webrtc', {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-  })
-  .then(() => console.log('✅  Mongo connected'))
-  .catch((err) => {
-    console.error('❌  Mongo connection failed', err);
+mongoose.connect(process.env.MONGO_URL || 'mongodb://127.0.0.1:27017/webrtc')
+  .then(()=> console.log('✅ Mongo connected'))
+  .catch(err=>{
+    console.error('❌ Mongo connection failed', err);
     process.exit(1);
   });
 

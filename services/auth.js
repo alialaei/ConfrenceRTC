@@ -6,6 +6,9 @@ const mongoose = require('mongoose');
 
 const { JWT_SECRET, JWT_EXPIRES = '30d' } = process.env;
 
+if (!process.env.JWT_SECRET)
+  throw new Error('JWT_SECRET env var is required');
+
 /* ─── Mongoose User model (imported once here) ─────────────────── */
 const userSchema = new mongoose.Schema({
   email   : { type:String, required:true, unique:true, lowercase:true },
