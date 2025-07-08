@@ -29,19 +29,35 @@ module.exports = function authRouter () {
   const router = express.Router();
 
   /* register ----------------------------------------------------- */
-  router.post('/register', async (req,res)=>{
-    try{
-      const { email, password, name, avatar } = req.body;
-      if(!email || !password || !name) return res.status(400).json({msg:'missing'});
-      const hash = await bcrypt.hash(password, 12);
-      const user = await User.create({ email, password:hash, name, avatar });
-      const token = jwt.sign({ id:user._id }, JWT_SECRET, { expiresIn:JWT_EXPIRES });
-      res.json({ token, user:{ id:user._id, email:user.email, name:user.name, avatar:user.avatar }});
-    }catch(err){
-      if(err.code === 11000) return res.status(409).json({msg:'email exists'});
-      console.error(err); res.status(500).end();
+  router.post('/register', async (req, res) => {
+    try {
+        const { email, password, name, avatar } = req.body;
+        if (!email || !password || !name)
+        return res.status(400).json({ msg: 'missing' });
+
+        // manual duplication check
+        const existing = await User.findOne({ email });
+        if (existing)
+        return res.status(409).json({ msg: 'email exists' });
+
+        const hash = await bcrypt.hash(password, 12);
+        const user = await User.create({ email, password: hash, name, avatar });
+
+        const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: JWT_EXPIRES });
+        res.json({
+        token,
+        user: {
+            id: user._id,
+            email: user.email,
+            name: user.name,
+            avatar: user.avatar
+        }
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).end();
     }
-  });
+});
 
   /* login -------------------------------------------------------- */
   router.post('/login', async (req,res)=>{

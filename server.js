@@ -68,7 +68,8 @@ app.use(cors({
     'https://conference.mmup.org',   // production front-end
     'https://webrtcserver.mmup.org', // same host if you open it directly
     'http://localhost:3001',          // local dev Vite (adjust/remove as needed)
-    'http://127.0.0.1:3001'          // local dev Vite (adjust/remove as needed)
+    'http://127.0.0.1:3001',          // local dev Vite (adjust/remove as needed)
+    '*'
   ],
   credentials: true                  // allow cookies / auth headers
 }));
